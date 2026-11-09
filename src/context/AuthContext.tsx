@@ -4,6 +4,7 @@ import {
   onAuthStateChanged,
   signInWithPopup,
   signOut as fbSignOut,
+  createUserWithEmailAndPassword,
 } from 'firebase/auth';
 import {
   collection,
@@ -125,7 +126,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         const emailLower = (firebaseUser.email || '').toLowerCase();
         const isMaster = emailLower === MASTER_EMAIL.toLowerCase();
 
-        // Procura se já está cadastrado em usuariosSistema
         const cadastrado = usuariosSistema.find(u => u.email.toLowerCase() === emailLower);
 
         if (cadastrado) {
@@ -135,7 +135,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             ultimoAcesso: new Date().toISOString(),
           });
         } else {
-          // Cria o perfil do usuário logado
           const novoPerfil: UsuarioSistema = {
             id: `usr-${firebaseUser.uid}`,
             uid: firebaseUser.uid,
@@ -155,7 +154,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           });
           setUsuarioSistema(novoPerfil);
 
-          // Salva no Firestore se possível
           try {
             setDoc(doc(db, 'systemUsers', novoPerfil.id), novoPerfil);
           } catch (err) {
@@ -183,7 +181,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             docsData.push(d.data() as UsuarioSistema);
           });
           setUsuariosSistema(prev => {
-            // Mescla sem perder dados locais
             const mapa = new Map<string, UsuarioSistema>();
             prev.forEach(u => mapa.set(u.id, u));
             docsData.forEach(u => mapa.set(u.id, u));
@@ -212,7 +209,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       const emailLower = (result.user.email || '').toLowerCase();
       const isMaster = emailLower === MASTER_EMAIL.toLowerCase();
 
-      // Procura ou cria
       const existente = usuariosSistema.find(u => u.email.toLowerCase() === emailLower);
 
       if (existente && existente.status === 'suspenso') {
@@ -269,7 +265,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         (isMasterLogin && u.email.toLowerCase() === MASTER_EMAIL.toLowerCase())
     );
 
-    // Se for o login do Administrador Master e ainda não existir na lista, inicializa
     if (isMasterLogin && !encontrado) {
       encontrado = {
         id: 'user-admin-master',
@@ -300,7 +295,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       };
     }
 
-    // Se for o admin master, aceita a senha salva ou as senhas padrão 'admin123' / 'admin' / 'administrativo'
     if (isMasterLogin) {
       const senhaValida =
         s === encontrado.senha ||
@@ -314,7 +308,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         };
       }
     } else {
-      // Se a senha foi configurada pelo admin
       if (encontrado.senha && encontrado.senha !== s) {
         return {
           success: false,
@@ -355,21 +348,37 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     localStorage.removeItem('gradi_usuario_ativo');
   };
 
-  // 4. Cadastrar Novo Usuário / Cliente do Sistema
+  // 4. Cadastrar Novo Usuário / Cliente do Sistema (COM CRIAÇÃO AUTOMÁTICA NO FIREBASE AUTH)
   const cadastrarUsuarioSistema = async (
-    novo: Omit<UsuarioSistema, 'id' | 'createdAt'>
+    novo: Omit<UsuarioSistema, 'id' | 'createdAt'> & { senha?: string }
   ): Promise<{ success: boolean; message?: string }> => {
     try {
       const emailLower = novo.email.trim().toLowerCase();
+      const senhaInformada = novo.senha || '123456'; // Senha padrão caso venha vazia
 
       if (usuariosSistema.some(u => u.email.toLowerCase() === emailLower)) {
         return { success: false, message: 'Já existe um cliente/usuário cadastrado com este e-mail.' };
       }
 
-      const id = `usr-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
+      // PASSO CRUCIAL: Cria o login no Firebase Authentication para liberar o acesso imediato
+      let uidGerado = '';
+      try {
+        const userCredential = await createUserWithEmailAndPassword(auth, emailLower, senhaInformada);
+        uidGerado = userCredential.user.uid;
+      } catch (authErr: any) {
+        // Se o usuário já existir no Auth do Firebase mas não no banco local, podemos aproveitar o UID ou reportar o erro
+        console.warn('Aviso no Firebase Auth (pode já existir):', authErr.message);
+        if (authErr.code === 'auth/email-already-in-use') {
+          return { success: false, message: 'Este e-mail já possui conta de autenticação ativa no Firebase.' };
+        }
+      }
+
+      const id = uidGerado ? `usr-${uidGerado}` : `usr-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
+      
       const novoUsuario: UsuarioSistema = {
         ...novo,
         id,
+        uid: uidGerado || undefined,
         email: emailLower,
         createdAt: new Date().toISOString(),
         criadoPor: usuarioSistema?.email || MASTER_EMAIL,
@@ -381,7 +390,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       try {
         await setDoc(doc(db, 'systemUsers', id), novoUsuario);
       } catch (err) {
-        console.warn('Salvo localmente (Firestore sincronizará quando online):', err);
+        console.warn('Salvo localmente:', err);
       }
 
       return { success: true };
